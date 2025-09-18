@@ -37,7 +37,8 @@ def cli():
 @click.option('--name', '-n', required=True, help='配置名称')
 @click.option('--appid', '-a', required=True, help='公众号AppID')
 @click.option('--secret', '-s', required=True, help='公众号AppSecret')
-def bind(name, appid, secret):
+@click.option('--token', '-t', help='消息服务器Token（可选）')
+def bind(name, appid, secret, token):
     """绑定微信公众号配置"""
     print_info(f"开始验证公众号配置: {name}")
 
@@ -51,10 +52,12 @@ def bind(name, appid, secret):
         print_success("公众号配置验证成功!")
 
         # 保存配置
-        if config_manager.save_wx_config(name, appid, secret):
+        if config_manager.save_wx_config(name, appid, secret, token):
             print_success(f"配置已保存: {name}")
             print_info(f"AppID: {appid}")
             print_info("AppSecret: " + "*" * (len(secret) - 8) + secret[-8:])
+            if token:
+                print_info(f"Token: {token}")
         else:
             print_error("保存配置失败")
     else:
@@ -140,6 +143,55 @@ def test(name):
         print_success("连接测试成功!")
     else:
         print_error("连接测试失败，请检查配置")
+
+@cli.command()
+@click.option('--name', '-n', required=True, help='使用的配置名称')
+@click.option('--port', '-p', default=443, help='服务器端口（默认443用于HTTPS）')
+@click.option('--host', '-h', default='0.0.0.0', help='服务器地址')
+@click.option('--domain', '-d', default='your-domain.com', help='外网访问域名')
+def server(name, port, host, domain):
+    """启动消息监听服务器"""
+    print_info(f"准备启动消息监听服务器，使用配置: {name}")
+
+    config_manager = ConfigManager()
+    config = config_manager.get_wx_config(name)
+
+    if not config:
+        print_error(f"未找到配置: {name}")
+        print_warning("请先使用 'bind' 命令绑定公众号配置")
+        return
+
+    token = config.get('token')
+    if not token:
+        print_error("该配置缺少Token，请重新绑定并提供Token")
+        print_warning("使用命令: python main.py bind -n <name> -a <appid> -s <secret> -t <token>")
+        return
+
+    print_info(f"使用公众号: {config['appid']}")
+    print_info(f"Token: {token}")
+    print_info(f"本地服务器: http://{host}:{port}")
+
+    # 根据端口判断协议
+    protocol = "https" if port == 443 else "http"
+    callback_url = f"{protocol}://{domain}/wechat"
+    print_info(f"微信回调URL: {callback_url}")
+
+    if port == 443:
+        print_warning("HTTPS模式需要SSL证书，建议使用nginx反向代理")
+        print_info("或者使用其他端口进行测试: -p 8080")
+
+    print_success("启动消息监听服务器...")
+
+    # 动态修改message_server中的token
+    import message_server
+    message_server.message_server.token = token
+
+    try:
+        message_server.app.run(host=host, port=port, debug=False)
+    except KeyboardInterrupt:
+        print_warning("服务器已停止")
+    except Exception as e:
+        print_error(f"服务器启动失败: {e}")
 
 if __name__ == '__main__':
     try:

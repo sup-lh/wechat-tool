@@ -7,13 +7,58 @@ import json
 import os
 import tempfile
 import random
+import re
 from typing import Optional, Dict, Any
-from PIL import Image, ImageDraw, ImageFont
+# from PIL import Image, ImageDraw, ImageFont  # 临时注释掉
 from io import BytesIO
 
 class WeChatAPI:
     def __init__(self):
         self.base_url = "https://api.weixin.qq.com"
+
+    def translate_to_english(self, text: str) -> str:
+        """将中文翻译为英文（使用简单的翻译服务）"""
+        try:
+            # 如果已经是英文，直接返回
+            if re.match(r'^[a-zA-Z0-9\s\.\,\!\?\-\_]+$', text):
+                return text
+
+            # 使用简单的词汇映射翻译（避免外部API依赖）
+            translation_dict = {
+                '今日': 'Today', '资讯': 'News', '新闻': 'News', '消息': 'Message',
+                '通知': 'Notice', '公告': 'Announcement', '更新': 'Update',
+                '科技': 'Technology', '技术': 'Tech', '数码': 'Digital',
+                '生活': 'Life', '健康': 'Health', '美食': 'Food',
+                '旅游': 'Travel', '音乐': 'Music', '电影': 'Movie',
+                '游戏': 'Game', '体育': 'Sports', '财经': 'Finance',
+                '教育': 'Education', '文化': 'Culture', '艺术': 'Art',
+                '时尚': 'Fashion', '汽车': 'Car', '房产': 'Real Estate',
+                '特朗普': 'Trump', '拜登': 'Biden', '中国': 'China',
+                '美国': 'USA', '日本': 'Japan', '韩国': 'Korea',
+                '测试': 'Test', '文章': 'Article', '内容': 'Content',
+                '标题': 'Title', '封面': 'Cover', '图片': 'Image'
+            }
+
+            # 尝试翻译文本中的中文词汇
+            translated_text = text
+            for chinese, english in translation_dict.items():
+                if chinese in translated_text:
+                    translated_text = translated_text.replace(chinese, english)
+
+            # 如果翻译后还有中文，使用拼音或简化版本
+            if re.search(r'[\u4e00-\u9fff]', translated_text):
+                # 简化处理：如果还有中文，就使用原标题的前10个字符
+                translated_text = f"Article_{random.randint(1000, 9999)}"
+
+            # 确保不超过适合显示的长度
+            if len(translated_text) > 20:
+                translated_text = translated_text[:17] + "..."
+
+            return translated_text
+
+        except Exception as e:
+            print(f"翻译失败: {e}")
+            return f"Cover_{random.randint(1000, 9999)}"
 
     def get_access_token(self, appid: str, secret: str) -> Optional[str]:
         """获取访问令牌，用于验证公众号配置是否正确"""
@@ -43,33 +88,89 @@ class WeChatAPI:
         access_token = self.get_access_token(appid, secret)
         return access_token is not None
 
-    def generate_temp_image(self, text: str = "测试图片") -> str:
-        """生成临时测试图片"""
-        # 创建一个简单的测试图片
-        width, height = 800, 600
-        image = Image.new('RGB', (width, height), color='lightblue')
-        draw = ImageDraw.Draw(image)
+    def generate_temp_image(self, text: str = "测试图片", title: str = "") -> str:
+        """生成临时图片，优先使用现有的demo.jpg，否则创建简单图片"""
+        demo_path = "demo.jpg"
+        if os.path.exists(demo_path):
+            return demo_path
 
-        # 尝试使用系统字体，如果没有就使用默认字体
+        # 如果demo.jpg不存在，创建一个简单的默认图片
         try:
-            font = ImageFont.truetype("arial.ttf", 36)
-        except:
-            font = ImageFont.load_default()
+            from PIL import Image, ImageDraw, ImageFont
 
-        # 添加随机颜色
-        colors = ['red', 'green', 'blue', 'orange', 'purple', 'brown']
-        color = random.choice(colors)
+            # 创建一个简单的封面图片
+            img = Image.new('RGB', (300, 200), color='#4a90e2')
+            draw = ImageDraw.Draw(img)
 
-        # 添加文字
-        draw.text((50, 50), text, fill=color, font=font)
-        draw.text((50, 150), f"随机数: {random.randint(1000, 9999)}", fill='black', font=font)
+            # 尝试使用默认字体，但避免中文编码问题
+            try:
+                # 在不同系统上尝试找到字体
+                font = ImageFont.load_default()
+            except:
+                font = None
 
-        # 保存到临时文件
-        temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-        image.save(temp_file.name, 'PNG')
-        temp_file.close()
+            # 在图片上绘制文字 - 使用翻译后的标题
+            if title:
+                text_to_draw = self.translate_to_english(title)
+            else:
+                text_to_draw = "Cover Image"  # 默认封面文字
+            try:
+                if font:
+                    # 计算文字位置（居中）
+                    bbox = draw.textbbox((0, 0), text_to_draw, font=font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                    x = (300 - text_width) // 2
+                    y = (200 - text_height) // 2
+                    draw.text((x, y), text_to_draw, fill='white', font=font)
+                else:
+                    # 如果没有字体，绘制简单的形状
+                    draw.rectangle([50, 75, 250, 125], fill='white')
+            except UnicodeEncodeError:
+                # 如果仍有编码问题，直接绘制形状
+                draw.rectangle([50, 75, 250, 125], fill='white')
+                draw.ellipse([125, 85, 175, 135], fill='#4a90e2')
 
-        return temp_file.name
+            # 保存临时图片
+            temp_path = "temp_cover.jpg"
+            img.save(temp_path, 'JPEG')
+            return temp_path
+
+        except ImportError:
+            # 如果没有PIL库，创建一个最小的占位符图片
+            # 创建一个1x1像素的最小JPEG文件
+            temp_path = "temp_cover.jpg"
+            with open(temp_path, 'wb') as f:
+                # 写入一个最小的JPEG文件头和数据
+                minimal_jpeg = b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x01\x01\x11\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00\xaa\xff\xd9'
+                f.write(minimal_jpeg)
+            return temp_path
+
+    def download_wechat_image(self, access_token: str, media_id: str) -> Optional[str]:
+        """从微信服务器下载图片"""
+        url = f"{self.base_url}/cgi-bin/media/get"
+        params = {
+            "access_token": access_token,
+            "media_id": media_id
+        }
+
+        try:
+            response = requests.get(url, params=params, timeout=30)
+
+            if response.status_code == 200:
+                # 保存临时文件
+                temp_path = f"temp_user_image_{random.randint(1000, 9999)}.jpg"
+                with open(temp_path, 'wb') as f:
+                    f.write(response.content)
+                print(f"✅ 微信图片下载成功: {temp_path}")
+                return temp_path
+            else:
+                print(f"❌ 下载微信图片失败: {response.status_code}")
+                return None
+
+        except Exception as e:
+            print(f"下载微信图片时发生错误: {e}")
+            return None
 
     def upload_material(self, access_token: str, image_path: str, material_type: str = "image") -> Optional[str]:
         """上传永久素材"""
@@ -100,7 +201,7 @@ class WeChatAPI:
             return None
 
     def add_draft(self, access_token: str, title: str, content: str, thumb_media_id: str,
-                  author: str = "测试作者", digest: str = "") -> Optional[str]:
+                  author: str = "不存在的画廊", digest: str = "") -> Optional[str]:
         """添加草稿"""
         url = f"{self.base_url}/cgi-bin/draft/add"
         params = {"access_token": access_token}
@@ -146,7 +247,8 @@ class WeChatAPI:
             return None
 
     def publish_to_draft(self, appid: str, secret: str, title: str = "测试文章",
-                        content: str = "这是一篇测试文章的内容") -> bool:
+                        content: str = "这是一篇测试文章的内容", author: str = "不存在的画廊",
+                        thumb_media_id: str = None) -> bool:
         """完整的发布到草稿箱流程"""
         print("🚀 开始发布流程...")
 
@@ -157,21 +259,32 @@ class WeChatAPI:
             print("❌ 获取access_token失败")
             return False
 
-        # 2. 生成临时图片
-        print("🎨 生成临时测试图片...")
-        temp_image_path = self.generate_temp_image(f"封面图片 - {title}")
+        # 2. 准备封面素材
+        if thumb_media_id:
+            # 使用传入的MediaId
+            print("🎨 使用用户提供的封面图片...")
+            media_id = thumb_media_id
+        else:
+            # 生成默认封面
+            print("🎨 生成默认封面图片...")
+            temp_image_path = self.generate_temp_image(f"封面图片 - {title}", title)
+
+            try:
+                # 3. 上传素材
+                print("📤 上传封面图片...")
+                media_id = self.upload_material(access_token, temp_image_path)
+                if not media_id:
+                    print("❌ 上传素材失败")
+                    return False
+            finally:
+                # 清理临时文件
+                if temp_image_path and os.path.exists(temp_image_path) and temp_image_path != "demo.jpg":
+                    os.unlink(temp_image_path)
 
         try:
-            # 3. 上传素材
-            print("📤 上传封面图片...")
-            media_id = self.upload_material(access_token, temp_image_path)
-            if not media_id:
-                print("❌ 上传素材失败")
-                return False
-
             # 4. 添加草稿
             print("📄 添加到草稿箱...")
-            draft_media_id = self.add_draft(access_token, title, content, media_id)
+            draft_media_id = self.add_draft(access_token, title, content, media_id, author)
             if not draft_media_id:
                 print("❌ 添加草稿失败")
                 return False
@@ -180,7 +293,55 @@ class WeChatAPI:
             return True
 
         finally:
-            # 清理临时文件
-            if os.path.exists(temp_image_path):
-                os.unlink(temp_image_path)
-                print("🧹 已清理临时文件")
+            # 清理临时文件（只清理非用户封面的默认生成文件）
+            if not thumb_media_id:  # 只有使用默认封面时才清理
+                if 'temp_image_path' in locals() and temp_image_path and os.path.exists(temp_image_path) and temp_image_path != "demo.jpg":
+                    os.unlink(temp_image_path)
+                    print("🧹 已清理临时文件")
+
+    def send_customer_message(self, access_token: str, openid: str, content: str) -> bool:
+        """发送客服消息"""
+        url = f"{self.base_url}/cgi-bin/message/custom/send"
+        params = {"access_token": access_token}
+
+        data = {
+            "touser": openid,
+            "msgtype": "text",
+            "text": {
+                "content": content
+            }
+        }
+
+        try:
+            response = requests.post(
+                url,
+                params=params,
+                data=json.dumps(data, ensure_ascii=False).encode('utf-8'),
+                headers={'Content-Type': 'application/json; charset=utf-8'},
+                timeout=10
+            )
+            result = response.json()
+
+            print(f"客服消息API响应: {result}")  # 添加详细日志
+
+            if result.get('errcode') == 0:
+                print(f"✅ 客服消息发送成功: {openid}")
+                return True
+            else:
+                error_code = result.get('errcode', '未知')
+                error_msg = result.get('errmsg', '未知错误')
+                print(f"❌ 客服消息发送失败: 错误码 {error_code}, 错误信息: {error_msg}, 用户: {openid}")
+
+                # 常见错误码说明
+                if error_code == 45015:
+                    print("提示: 回复时间超过48小时限制，用户需要在48小时内主动发送过消息才能接收客服消息")
+                elif error_code == 40001:
+                    print("提示: access_token失效或错误")
+                elif error_code == 40013:
+                    print("提示: 用户拒绝接收消息或openid无效")
+
+                return False
+
+        except Exception as e:
+            print(f"发送客服消息时发生错误: {e}")
+            return False
