@@ -287,92 +287,9 @@ token:your_token"""
         else:
             return "❌ 微信配置验证失败，请检查AppID和AppSecret是否正确"
 
-    def _handle_publish(self, params: Dict) -> str:
-        """处理发布文章"""
-        name = params.get('name', '')
-        title = params.get('title', '微信消息发布的测试文章')
-        content = params.get('content', '这是通过微信消息发布的文章内容')
 
-        if not name:
-            return """❌ 缺少配置名称！
 
-正确格式：
-/publish 配置名称
-title:文章标题
-content:文章内容..."""
 
-        # 获取配置
-        config = self.config_manager.get_wx_config(name)
-        if not config:
-            return f"❌ 未找到配置: {name}\r\n\r\n请先使用 /bind 命令绑定配置"
-
-        # 发布文章
-        logger.info(f"发布文章到草稿箱: {title}")
-        success = self.wechat_api.publish_to_draft(
-            config['appid'],
-            config['secret'],
-            title,
-            content
-        )
-
-        if success:
-            return f"""✅ 文章发布成功！
-
-📝 标题: {title}
-📱 公众号: {config['appid']}
-🎯 已发布到草稿箱
-
-可在微信公众平台后台查看～"""
-        else:
-            return "❌ 文章发布失败，请检查配置和网络连接"
-
-    def _handle_list(self) -> str:
-        """处理列出配置"""
-        configs = self.config_manager.list_configs()
-
-        if not configs:
-            return "📭 暂无已绑定的配置\r\n\r\n使用 /bind 命令添加公众号配置"
-
-        result = "📱 已绑定的公众号配置：\r\n\r\n"
-        for name, config in configs.items():
-            secret_masked = '*' * (len(config['secret']) - 8) + config['secret'][-8:]
-            result += f"• {name}\r\n"
-            result += f"  AppID: {config['appid']}\r\n"
-            result += f"  Secret: {secret_masked}\r\n"
-            if 'token' in config:
-                result += f"  Token: {config['token']}\r\n"
-            result += "\r\n"
-
-        return result.strip()
-
-    def _handle_delete(self, params: Dict) -> str:
-        """处理删除配置"""
-        name = params.get('name', '')
-
-        if not name:
-            return "❌ 请指定要删除的配置名称\r\n\r\n格式: /delete 配置名称"
-
-        if self.config_manager.delete_config(name):
-            return f"✅ 配置 '{name}' 已删除"
-        else:
-            return f"❌ 配置 '{name}' 不存在"
-
-    def _handle_test(self, params: Dict) -> str:
-        """处理测试配置"""
-        name = params.get('name', '')
-
-        if not name:
-            return "❌ 请指定要测试的配置名称\r\n\r\n格式: /test 配置名称"
-
-        config = self.config_manager.get_wx_config(name)
-        if not config:
-            return f"❌ 未找到配置: {name}"
-
-        logger.info(f"测试配置连接: {name}")
-        if self.wechat_api.validate_wechat_config(config['appid'], config['secret']):
-            return f"✅ 配置 '{name}' 连接测试成功！\r\n\r\n可正常使用微信API接口"
-        else:
-            return f"❌ 配置 '{name}' 连接测试失败\r\n\r\n请检查AppID和Secret是否正确"
 
     def _handle_admin_help(self) -> str:
         """处理管理员帮助"""
@@ -382,30 +299,17 @@ content:文章内容..."""
 • /list - 查看所有用户的配置情况
 • /help - 显示此帮助
 
-🎯 管理员主要用于监控系统使用情况
-用户可以自己管理自己的配置，无需管理员干预
+🎯 管理员只负责监控用户配置使用情况
+所有功能操作都由用户通过微信消息完成
 
-嘿嘿~ 简洁的管理功能！(´∀｀) 💖"""
+嘿嘿~ 简洁高效的管理！(´∀｀) 💖"""
 
     def _handle_admin_list(self) -> str:
         """处理管理员查看所有配置"""
-        # 获取系统配置（原管理员配置）
-        system_configs = self.config_manager.list_configs()
-
         # 获取所有用户配置
         user_configs = self.config_manager.config_data.get('user_configs', {})
 
-        result = "🔧 系统配置监控面板\r\n\r\n"
-
-        # 系统配置
-        if system_configs:
-            result += "📋 系统级配置：\r\n"
-            for name, config in system_configs.items():
-                if name != 'user_configs':  # 排除用户配置数据
-                    secret_masked = '*' * (len(config.get('secret', '')) - 8) + config.get('secret', '')[-8:]
-                    result += f"• {name}\r\n"
-                    result += f"  AppID: {config.get('appid', 'N/A')}\r\n"
-                    result += f"  Secret: {secret_masked}\r\n\r\n"
+        result = "🔧 用户配置监控面板\r\n\r\n"
 
         # 用户配置统计
         if user_configs:
@@ -416,10 +320,11 @@ content:文章内容..."""
 
             result += "👤 用户详情：\r\n"
             for user_id, configs in user_configs.items():
-                user_short = user_id[-8:] if len(user_id) > 8 else user_id
-                result += f"• 用户 ...{user_short}: {len(configs)}个配置\r\n"
+                result += f"• 用户 {user_id}: {len(configs)}个配置\r\n"
                 for nickname, config in configs.items():
-                    result += f"  └ {nickname} ({config.get('appid', 'N/A')})\r\n"
+                    result += f"  └ {nickname}\r\n"
+                    result += f"    AppID: {config.get('appid', 'N/A')}\r\n"
+                    result += f"    Secret: {config.get('secret', 'N/A')}\r\n"
             result += "\r\n"
         else:
             result += "👥 暂无用户配置\r\n\r\n"

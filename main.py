@@ -109,6 +109,9 @@ def list():
 
     print_info("已绑定的公众号配置:")
     for name, config in configs.items():
+        # 跳过用户配置数据
+        if name == 'user_configs':
+            continue
         print(f"  📱 {Fore.CYAN}{name}{Style.RESET_ALL}")
         print(f"     AppID: {config['appid']}")
         print(f"     Secret: {'*' * (len(config['secret']) - 8)}{config['secret'][-8:]}")

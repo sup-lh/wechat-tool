@@ -90,6 +90,7 @@ rsync -av \
   --exclude='captcha.jpg' \
   --exclude='demo.py' \
   --exclude='*.backup.*' \
+  --exclude='wx_config.json' \
   ./* ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/ || error_exit "文件上传失败"
 success "文件上传完成"
 
@@ -121,6 +122,36 @@ ssh ${REMOTE_USER}@${REMOTE_HOST} "
     echo '服务器环境配置完成'
 " || error_exit "服务器环境配置失败"
 success "服务器环境配置完成"
+
+# 步骤5.5: 检查并恢复配置文件
+info "步骤5.5: 检查配置文件..."
+ssh ${REMOTE_USER}@${REMOTE_HOST} "
+    cd ${REMOTE_DIR}
+
+    # 如果配置文件不存在且有备份，则恢复最新备份
+    if [ ! -f wx_config.json ] && [ \$(ls -1 wx_config.json.backup.* 2>/dev/null | wc -l) -gt 0 ]; then
+        latest_backup=\$(ls -1t wx_config.json.backup.* | head -1)
+        echo \"恢复配置文件: \$latest_backup -> wx_config.json\"
+        cp \"\$latest_backup\" wx_config.json
+    fi
+
+    # 如果仍然没有配置文件，创建一个基础配置
+    if [ ! -f wx_config.json ]; then
+        echo '创建基础配置文件...'
+        cat > wx_config.json << 'EOF'
+{
+  \"${CONFIG_NAME}\": {
+    \"appid\": \"请在微信公众平台获取\",
+    \"secret\": \"请在微信公众平台获取\",
+    \"token\": \"suplin123123\"
+  }
+}
+EOF
+    fi
+
+    echo '配置文件检查完成'
+" || warning "配置文件检查出现警告，继续部署..."
+success "配置文件检查完成"
 
 # 步骤6: 创建 systemd 服务文件
 info "步骤6: 创建系统服务..."
