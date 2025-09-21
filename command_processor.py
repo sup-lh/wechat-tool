@@ -9,6 +9,8 @@ import os
 from typing import Dict, Optional, Tuple, List
 from config import ConfigManager
 from wechat_api import WeChatAPI
+from tutu_api import TutuAPI
+from work_storage import WorkStorage
 import logging
 
 logger = logging.getLogger(__name__)
@@ -17,6 +19,16 @@ class CommandProcessor:
     def __init__(self):
         self.config_manager = ConfigManager()
         self.wechat_api = WeChatAPI()
+        self.tutu_api = TutuAPI()
+        self.work_storage = WorkStorage()
+
+        # 启动时清理过期的工作数据（保留7天）
+        try:
+            cleaned_count = self.work_storage.clean_expired_works(days=7)
+            if cleaned_count > 0:
+                logger.info(f"启动时清理了 {cleaned_count} 个过期的图图工作")
+        except Exception as e:
+            logger.warning(f"清理过期工作数据失败: {e}")
 
         # 管理员会话状态 (用户ID -> 权限到期时间)
         self.admin_sessions = {}
@@ -26,6 +38,9 @@ class CommandProcessor:
 
         # 会话过期时间 (30分钟)
         self.session_timeout = 30 * 60
+
+        # 暂存生成时的标题信息 (work_id -> {'title': str, 'timestamp': float})
+        self.pending_titles = {}
 
     def is_admin(self, user_id: str) -> bool:
         """检查用户是否有管理员权限"""
@@ -165,6 +180,50 @@ class CommandProcessor:
         if '发布' in content and '使用' in content:
             return 'user_publish_help', {}
 
+        # 图图生成格式：图图 {标题} {描述}
+        tutu_pattern = r'^图图\s+(.+?)\s+(.+)$'
+        tutu_match = re.match(tutu_pattern, content)
+        if tutu_match:
+            title, plot = tutu_match.groups()
+            return 'tutu_generate', {
+                'title': title.strip(),
+                'plot': plot.strip()
+            }
+
+        # 图图格式检测（格式错误提示）
+        if content.startswith('图图'):
+            return 'tutu_help', {}
+
+        # 查询图图格式：查询图图 {工作ID}
+        query_tutu_pattern = r'^查询图图\s+([a-zA-Z0-9]+)$'
+        query_tutu_match = re.match(query_tutu_pattern, content)
+        if query_tutu_match:
+            work_id = query_tutu_match.group(1)
+            return 'tutu_query', {
+                'work_id': work_id.strip()
+            }
+
+        # 查询图图格式检测（格式错误提示）
+        if content.startswith('查询图图'):
+            return 'tutu_query_help', {}
+
+        # 发布图图格式：发布图图 {工作ID} {昵称} {标题} [作者]
+        publish_tutu_pattern = r'^发布图图\s+([a-zA-Z0-9]+)\s+(.+?)\s+(.+?)(?:\s+(.+?))?$'
+        publish_tutu_match = re.match(publish_tutu_pattern, content)
+        if publish_tutu_match:
+            work_id, nickname, title, author = publish_tutu_match.groups()
+            return 'tutu_publish', {
+                'work_id': work_id.strip(),
+                'nickname': nickname.strip(),
+                'title': title.strip(),
+                'author': author.strip() if author else "不存在的画廊"
+            }
+
+        # 发布图图格式检测（格式错误提示）
+        if content.startswith('发布图图'):
+            return 'tutu_publish_help', {}
+
+
         # 原有的基础指令
         if '你好' in content or 'hello' in content_lower:
             return 'greeting', {}
@@ -218,6 +277,18 @@ class CommandProcessor:
             return self._handle_user_publish_help()
         elif command == 'user_list_configs':
             return self._handle_user_list_configs(user_id)
+        elif command == 'tutu_generate':
+            return self._handle_tutu_generate(params)
+        elif command == 'tutu_help':
+            return self._handle_tutu_help()
+        elif command == 'tutu_query':
+            return self._handle_tutu_query(params)
+        elif command == 'tutu_query_help':
+            return self._handle_tutu_query_help()
+        elif command == 'tutu_publish':
+            return self._handle_tutu_publish(user_id, params)
+        elif command == 'tutu_publish_help':
+            return self._handle_tutu_publish_help()
 
         # 基础功能
         elif command == 'greeting':
@@ -366,6 +437,11 @@ token:your_token"""
 • 我的配置 - 查看你的所有配置
 • 测试 昵称 - 测试配置连接
 • 使用 昵称 发布 标题 内容 作者 - 发布文章到草稿箱
+
+🎨 图片生成功能：
+• 图图 标题 描述 - 生成专属图片
+• 查询图图 工作ID - 查看图片生成进度并自动绑定
+• 发布图图 工作ID 昵称 标题 [作者] - 发布系列图片草稿箱
 
 """
 
@@ -609,3 +685,363 @@ token:your_token"""
         result += "嘿嘿~ 这些都是你专属的配置哦！(´∀｀) 💖"
 
         return result
+
+    def _handle_tutu_generate(self, params: Dict) -> str:
+        """处理图图生成请求"""
+        title = params.get('title', '')
+        plot = params.get('plot', '')
+
+        if not title or not plot:
+            return self._handle_tutu_help()
+
+        logger.info(f"处理图图生成请求 - 标题: {title}, 描述: {plot}")
+
+        # 调用图图API
+        result = self.tutu_api.create_image(title, plot)
+
+        if result:
+            # 如果生成成功，保存标题信息以备后续查询时使用
+            if result.get('code') == 200:
+                data = result.get('data', {})
+                work_id = data.get('id', '')
+                if work_id:
+                    self.pending_titles[work_id] = {
+                        'title': title,
+                        'timestamp': time.time()
+                    }
+                    logger.info(f"保存标题信息: {work_id} -> {title}")
+
+                    # 清理过期的暂存标题（超过1小时的）
+                    self._clean_expired_pending_titles()
+
+            return self.tutu_api.format_api_response(result, title, plot)
+        else:
+            return f"""❌ 图片生成失败
+
+🎨 标题: {title}
+📝 描述: {plot}
+
+请检查网络连接或稍后重试～ (´∀｀)"""
+
+    def _handle_tutu_help(self) -> str:
+        """处理图图帮助信息"""
+        return """🎨 图图生成功能帮助
+
+正确格式：
+图图 标题 描述
+
+例如：
+图图 美丽风景 一片美丽的山水风景，阳光明媚，绿树成荫
+
+📝 使用说明：
+• 标题：简短描述图片主题
+• 描述：详细描述您想要的图片内容
+• 每次生成4张图片
+• 使用快速模式生成
+
+嘿嘿~ 试试用图图来创作你的专属图片吧！(´∀｀) 🎨✨"""
+
+    def _handle_tutu_query(self, params: Dict) -> str:
+        """处理查询图图请求"""
+        work_id = params.get('work_id', '')
+
+        if not work_id:
+            return self._handle_tutu_query_help()
+
+        logger.info(f"处理图图查询请求 - 工作ID: {work_id}")
+
+        # 首先检查本地是否已经绑定
+        if self.work_storage.work_exists(work_id):
+            work_data = self.work_storage.get_work(work_id)
+            image_count = len(work_data.get('image_urls', []))
+            title = work_data.get('title', '未知作品')
+
+            return f"""✅ 已经生成并绑定成功{image_count}张图片！
+
+🆔 工作ID: {work_id}
+🎨 标题: {title}
+📊 状态: 已完成并绑定
+📸 图片数量: {image_count}张
+
+💡 现在可以使用以下指令发布到草稿箱：
+发布图图 {work_id} 昵称 文章标题 [作者]
+
+例如：发布图图 {work_id} 我的公众号 {title}作品集 小编
+
+嘿嘿~ 快去发布你的专属图片作品吧！(´∀｀) 🎨✨"""
+
+        # 调用图图API查询分镜
+        result = self.tutu_api.get_work_shots(work_id)
+
+        if result and result.get('code') == 200:
+            shots_data = result.get('data', [])
+            completed_shots = [shot for shot in shots_data if shot.get('status') == 'COMPLETED']
+
+            # 如果所有分镜都完成了，自动绑定
+            if completed_shots and len(completed_shots) == len(shots_data):
+                # 尝试从暂存的标题信息中获取标题
+                pending_info = self.pending_titles.get(work_id, {})
+                title = pending_info.get('title', "AI生成图片")
+
+                success = self.work_storage.save_work(work_id, title, shots_data)
+
+                if success:
+                    image_count = len(completed_shots)
+                    logger.info(f"工作 {work_id} 自动绑定成功，包含 {image_count} 张图片")
+
+                    # 清理暂存的标题信息
+                    if work_id in self.pending_titles:
+                        del self.pending_titles[work_id]
+                        logger.info(f"清理暂存标题信息: {work_id}")
+
+                    return f"""✅ 已经生成并绑定成功{image_count}张图片！
+
+🆔 工作ID: {work_id}
+🎨 标题: {title}
+📊 状态: 刚刚完成并自动绑定
+📸 图片数量: {image_count}张
+
+💡 现在可以使用以下指令发布到草稿箱：
+发布图图 {work_id} 昵称 文章标题 [作者]
+
+例如：发布图图 {work_id} 我的公众号 {title}作品集 小编
+
+嘿嘿~ 快去发布你的专属图片作品吧！(´∀｀) 🎨✨"""
+                else:
+                    logger.error(f"工作 {work_id} 自动绑定失败")
+
+            # 如果还没完成或绑定失败，返回普通查询结果
+            return self.tutu_api.format_shots_response(shots_data, work_id)
+        else:
+            error_message = result.get('message', '查询失败') if result else '网络错误'
+            return f"""❌ 查询图图作品失败
+
+🆔 工作ID: {work_id}
+❗ 错误信息: {error_message}
+
+请检查工作ID是否正确或稍后重试～ (´∀｀)"""
+
+    def _handle_tutu_query_help(self) -> str:
+        """处理查询图图帮助信息"""
+        return """📸 查询图图功能帮助
+
+正确格式：
+查询图图 工作ID
+
+例如：
+查询图图 e8bcd7eb6182101601067111e8d231a9
+
+📝 使用说明：
+• 工作ID：生成图片时返回的任务ID
+• 查询当前作品的分镜生成进度
+• 显示已完成分镜的图片链接
+
+嘿嘿~ 用这个指令来查看你的图片生成进度吧！(´∀｀) 📸✨"""
+
+    def _handle_tutu_publish(self, user_id: str, params: Dict) -> str:
+        """处理发布图图到草稿箱请求"""
+        work_id = params.get('work_id', '')
+        nickname = params.get('nickname', '')
+        title = params.get('title', '')
+        author = params.get('author', '不存在的画廊')
+
+        if not work_id or not nickname or not title:
+            return self._handle_tutu_publish_help()
+
+        logger.info(f"用户 {user_id} 请求发布图图作品 - 工作ID: {work_id}, 配置: {nickname}, 标题: {title}")
+
+        # 1. 验证WorkID是否存在
+        if not self.work_storage.work_exists(work_id):
+            return f"""❌ 工作ID未找到或未绑定
+
+🆔 工作ID: {work_id}
+
+请先使用「查询图图 {work_id}」确认图片已生成并绑定成功～ (´∀｀)"""
+
+        # 2. 获取用户配置
+        config = self.config_manager.get_user_config(user_id, nickname)
+        if not config:
+            return f"❌ 找不到昵称 '{nickname}' 的配置\r\n\r\n要不先绑定一个？嘿嘿~ (´∀｀)"
+
+        # 3. 获取access_token
+        access_token = self.wechat_api.get_access_token(config['appid'], config['secret'])
+        if not access_token:
+            return f"""❌ 获取微信访问令牌失败
+
+📱 公众号: {nickname}
+🔧 请检查AppID和Secret配置是否正确～ (´∀｀)"""
+
+        # 4. 获取图片URLs和描述
+        image_urls = self.work_storage.get_image_urls(work_id)
+        descriptions = self.work_storage.get_shot_descriptions(work_id)
+
+        if not image_urls:
+            return f"""❌ 未找到绑定的图片
+
+🆔 工作ID: {work_id}
+
+请重新查询图图状态确认图片已正确绑定～ (´∀｀)"""
+
+        logger.info(f"开始处理 {len(image_urls)} 张图片")
+
+        # 5. 批量下载并上传图片
+        uploaded_media_ids = []
+        temp_files = []
+
+        try:
+            for i, image_url in enumerate(image_urls, 1):
+                logger.info(f"📥 处理第 {i}/{len(image_urls)} 张图片")
+
+                # 下载图片
+                temp_path = self.wechat_api.download_image_from_url(image_url)
+
+                if temp_path:
+                    temp_files.append(temp_path)
+
+                    # 上传到永久素材库
+                    media_id = self.wechat_api.upload_material(access_token, temp_path)
+
+                    if media_id:
+                        uploaded_media_ids.append(media_id)
+                        logger.info(f"✅ 第 {i} 张图片上传成功: {media_id}")
+                    else:
+                        logger.error(f"❌ 第 {i} 张图片上传失败")
+                        break
+                else:
+                    logger.error(f"❌ 第 {i} 张图片下载失败")
+                    break
+
+            # 6. 生成富文本内容
+            if uploaded_media_ids:
+                work_data = self.work_storage.get_work(work_id)
+                original_title = work_data.get('title', 'AI生成图片')
+
+                content = self._generate_tutu_article_content(
+                    uploaded_media_ids, descriptions, work_id, original_title
+                )
+
+                # 7. 创建草稿箱（使用第一张图片作为封面）
+                thumb_media_id = uploaded_media_ids[0]
+                draft_media_id = self.wechat_api.add_draft(
+                    access_token, title, content, thumb_media_id, author
+                )
+
+                if draft_media_id:
+                    success_message = f"""✅ 系列图片草稿箱创建成功！
+
+🆔 工作ID: {work_id}
+📝 文章标题: {title}
+👤 作者: {author}
+📱 公众号: {nickname}
+📸 包含图片: {len(uploaded_media_ids)}张
+📋 草稿箱ID: {draft_media_id}
+
+🎨 封面: 使用第一张生成图片
+💡 内容: 包含所有图片和分镜描述
+
+快去微信公众平台后台「素材管理」→「草稿箱」查看你的专属作品吧！✨
+
+嘿嘿~ 你的AI图片作品集已经准备好啦！(´∀｀) 🎨💖"""
+                    return success_message
+                else:
+                    return f"""❌ 草稿箱创建失败
+
+📸 图片已成功上传到素材库
+🔧 请检查公众号权限或稍后重试～ (´∀｀)"""
+
+            else:
+                return f"""❌ 图片处理失败
+
+🆔 工作ID: {work_id}
+❗ 无法下载或上传图片
+
+请检查网络连接或稍后重试～ (´∀｀)"""
+
+        finally:
+            # 8. 清理临时文件
+            for temp_file in temp_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
+                        logger.info(f"🧹 清理临时文件: {temp_file}")
+                except Exception as e:
+                    logger.warning(f"清理临时文件失败: {e}")
+
+    def _generate_tutu_article_content(self, media_ids: List[str], descriptions: List[str],
+                                     work_id: str, original_title: str) -> str:
+        """生成图图文章的富文本内容"""
+        content = f"""<p><strong>🎨 AI生成图片作品集</strong></p>
+<p>原始标题：{original_title}</p>
+<p>工作ID：{work_id}</p>
+<p>生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+<br>
+
+"""
+
+        # 添加每张图片和对应的描述
+        for i, (media_id, description) in enumerate(zip(media_ids, descriptions), 1):
+            # 截取描述的前100个字符
+            short_desc = description[:100] + "..." if len(description) > 100 else description
+
+            content += f"""<p><strong>分镜 {i}：</strong></p>
+<p><img src="{media_id}" alt="分镜{i}" /></p>
+<p>{short_desc}</p>
+<br>
+
+"""
+
+        content += f"""<p>✨ 本作品由AI智能生成</p>
+<p>📱 通过微信公众号助手创建</p>
+<p>🎯 作品包含 {len(media_ids)} 张精美图片</p>"""
+
+        return content
+
+    def _handle_tutu_publish_help(self) -> str:
+        """处理发布图图帮助信息"""
+        return """📤 发布图图功能帮助
+
+正确格式：
+发布图图 工作ID 昵称 标题 [作者]
+
+例如：
+发布图图 e8bcd7eb6182101601067111e8d231a9 我的公众号 美丽风景作品集 小编
+
+📝 使用说明：
+• 工作ID：已绑定的图图任务ID
+• 昵称：您绑定的公众号配置昵称
+• 标题：草稿箱文章标题
+• 作者：可选，默认为"不存在的画廊"
+
+🎨 功能特点：
+• 自动下载所有生成的图片
+• 批量上传到微信永久素材库
+• 创建包含所有图片的富文本草稿箱
+• 使用第一张图片作为封面
+• 包含分镜描述和作品信息
+
+💡 提示：
+先用「查询图图 工作ID」确认图片已绑定
+再用此指令创建专属的图片作品集
+
+嘿嘿~ 让你的AI图片变成精美的公众号文章！(´∀｀) 📤✨"""
+
+    def _clean_expired_pending_titles(self) -> None:
+        """清理过期的暂存标题信息（超过1小时的）"""
+        try:
+            current_time = time.time()
+            expired_keys = []
+
+            for work_id, info in self.pending_titles.items():
+                timestamp = info.get('timestamp', 0)
+                if current_time - timestamp > 3600:  # 1小时 = 3600秒
+                    expired_keys.append(work_id)
+
+            for key in expired_keys:
+                del self.pending_titles[key]
+
+            if expired_keys:
+                logger.info(f"清理了 {len(expired_keys)} 个过期的暂存标题")
+
+        except Exception as e:
+            logger.warning(f"清理过期暂存标题失败: {e}")
+

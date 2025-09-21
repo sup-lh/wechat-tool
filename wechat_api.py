@@ -8,7 +8,7 @@ import os
 import tempfile
 import random
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 # from PIL import Image, ImageDraw, ImageFont  # 临时注释掉
 from io import BytesIO
 
@@ -345,3 +345,147 @@ class WeChatAPI:
         except Exception as e:
             print(f"发送客服消息时发生错误: {e}")
             return False
+
+    def download_image_from_url(self, image_url: str) -> Optional[str]:
+        """
+        从URL下载图片到本地临时文件
+
+        Args:
+            image_url: 图片URL
+
+        Returns:
+            临时文件路径，失败时返回None
+        """
+        try:
+            print(f"📥 开始下载图片: {image_url}")
+
+            # 发送GET请求下载图片
+            response = requests.get(image_url, timeout=30)
+
+            if response.status_code == 200:
+                # 创建临时文件
+                temp_path = f"temp_downloaded_image_{random.randint(1000, 9999)}.jpg"
+
+                with open(temp_path, 'wb') as f:
+                    f.write(response.content)
+
+                print(f"✅ 图片下载成功: {temp_path}")
+                return temp_path
+            else:
+                print(f"❌ 图片下载失败 - 状态码: {response.status_code}")
+                return None
+
+        except requests.exceptions.Timeout:
+            print("❌ 图片下载超时")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"❌ 图片下载异常: {e}")
+            return None
+        except Exception as e:
+            print(f"❌ 图片下载发生未知错误: {e}")
+            return None
+
+    def upload_images_to_material(self, access_token: str, image_urls: List[str]) -> List[Dict[str, str]]:
+        """
+        批量上传图片到永久素材库
+
+        Args:
+            access_token: 微信访问令牌
+            image_urls: 图片URL列表
+
+        Returns:
+            上传结果列表，每个元素包含 {'url': str, 'media_id': str, 'success': bool, 'error': str}
+        """
+        results = []
+
+        for i, image_url in enumerate(image_urls, 1):
+            result = {
+                'url': image_url,
+                'media_id': '',
+                'success': False,
+                'error': ''
+            }
+
+            try:
+                print(f"📤 上传第 {i}/{len(image_urls)} 张图片...")
+
+                # 下载图片
+                temp_path = self.download_image_from_url(image_url)
+
+                if temp_path:
+                    # 上传到永久素材库
+                    media_id = self.upload_material(access_token, temp_path)
+
+                    if media_id:
+                        result['media_id'] = media_id
+                        result['success'] = True
+                        print(f"✅ 第 {i} 张图片上传成功: {media_id}")
+                    else:
+                        result['error'] = "上传到素材库失败"
+                        print(f"❌ 第 {i} 张图片上传到素材库失败")
+
+                    # 清理临时文件
+                    try:
+                        if os.path.exists(temp_path):
+                            os.unlink(temp_path)
+                    except Exception as e:
+                        print(f"⚠️ 清理临时文件失败: {e}")
+
+                else:
+                    result['error'] = "图片下载失败"
+                    print(f"❌ 第 {i} 张图片下载失败")
+
+            except Exception as e:
+                result['error'] = str(e)
+                print(f"❌ 第 {i} 张图片处理失败: {e}")
+
+            results.append(result)
+
+        return results
+
+    def format_upload_results(self, results: List[Dict[str, str]], work_id: str) -> str:
+        """
+        格式化批量上传结果为用户友好的消息
+
+        Args:
+            results: 上传结果列表
+            work_id: 工作ID
+
+        Returns:
+            格式化后的消息字符串
+        """
+        successful_uploads = [r for r in results if r['success']]
+        failed_uploads = [r for r in results if not r['success']]
+
+        message = f"""📸 图图作品上传完成！
+
+🆔 工作ID: {work_id}
+📊 上传结果: {len(successful_uploads)}/{len(results)} 成功
+
+"""
+
+        if successful_uploads:
+            message += "✅ 上传成功的图片：\n"
+            for i, result in enumerate(successful_uploads, 1):
+                media_id = result['media_id']
+                message += f"🎬 分镜{i}: {media_id}\n"
+            message += "\n"
+
+        if failed_uploads:
+            message += f"❌ {len(failed_uploads)} 张图片上传失败：\n"
+            for i, result in enumerate(failed_uploads, 1):
+                error = result.get('error', '未知错误')
+                message += f"• 图片{i}: {error}\n"
+            message += "\n"
+
+        if successful_uploads:
+            message += """💡 使用说明：
+• 这些 media_id 可以用于发布文章时作为封面或插图
+• 图片已保存到您的微信公众号永久素材库
+• 可在公众平台后台「素材管理」中查看
+
+嘿嘿~ 图片上传完成啦！(´∀｀) 🎨✨"""
+        else:
+            message += "😅 所有图片都上传失败了，请检查网络连接或稍后重试～"
+
+        return message
