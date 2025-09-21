@@ -6,7 +6,7 @@
 import re
 import time
 import os
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Tuple, List
 from config import ConfigManager
 from wechat_api import WeChatAPI
 from tutu_api import TutuAPI
@@ -871,9 +871,8 @@ token:your_token"""
 📱 公众号: {nickname}
 🔧 请检查AppID和Secret配置是否正确～ (´∀｀)"""
 
-        # 4. 获取图片URLs和描述
+        # 4. 获取图片URLs
         image_urls = self.work_storage.get_image_urls(work_id)
-        descriptions = self.work_storage.get_shot_descriptions(work_id)
 
         if not image_urls:
             return f"""❌ 未找到绑定的图片
@@ -917,7 +916,7 @@ token:your_token"""
                 original_title = work_data.get('title', 'AI生成图片')
 
                 content = self._generate_tutu_article_content(
-                    uploaded_media_ids, descriptions, work_id, original_title
+                    uploaded_media_ids, work_id, original_title
                 )
 
                 # 7. 创建草稿箱（使用第一张图片作为封面）
@@ -967,32 +966,26 @@ token:your_token"""
                 except Exception as e:
                     logger.warning(f"清理临时文件失败: {e}")
 
-    def _generate_tutu_article_content(self, media_ids: List[str], descriptions: List[str],
-                                     work_id: str, original_title: str) -> str:
-        """生成图图文章的富文本内容"""
-        content = f"""<p><strong>🎨 AI生成图片作品集</strong></p>
-<p>原始标题：{original_title}</p>
-<p>工作ID：{work_id}</p>
-<p>生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}</p>
-<br>
+    def _generate_tutu_article_content(self, media_ids: List[str], work_id: str, original_title: str) -> str:
+        """生成图图文章的富文本内容（符合微信公众号规范）"""
 
-"""
+        # 文章头部信息
+        content = f"""<p style="text-align: center;"><strong>🎨 AI生成图片作品集</strong></p>
+<p style="text-align: center; color: #666; font-size: 14px;">原始标题：{original_title}</p>
+<p style="text-align: center; color: #666; font-size: 12px;">工作ID：{work_id}</p>
+<p style="text-align: center; color: #666; font-size: 12px;">生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+<p><br></p>
+<p style="text-align: center; color: #999;">━━━━━━━━━━━━━━━━━━━━━━━━━━━━</p>
+<p><br></p>"""
 
-        # 添加每张图片和对应的描述
-        for i, (media_id, description) in enumerate(zip(media_ids, descriptions), 1):
-            # 截取描述的前100个字符
-            short_desc = description[:100] + "..." if len(description) > 100 else description
+        # 添加每张图片
+        for i, media_id in enumerate(media_ids, 1):
+            content += f"""<p style="text-align: center; margin-top: 20px;"><strong>📸 分镜 {i}</strong></p>
+<p style="text-align: center; margin: 10px 0;">
+    <img data-src="{media_id}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
+</p>
+<p><br></p>"""
 
-            content += f"""<p><strong>分镜 {i}：</strong></p>
-<p><img src="{media_id}" alt="分镜{i}" /></p>
-<p>{short_desc}</p>
-<br>
-
-"""
-
-        content += f"""<p>✨ 本作品由AI智能生成</p>
-<p>📱 通过微信公众号助手创建</p>
-<p>🎯 作品包含 {len(media_ids)} 张精美图片</p>"""
 
         return content
 
