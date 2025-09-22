@@ -176,6 +176,92 @@ class WorkStorage:
             return success
         return False
 
+    def mark_as_published(self, work_id: str, user_id: str, nickname: str, title: str, author: str,
+                         publish_result: Dict = None) -> bool:
+        """
+        标记工作为已发布，包含详细的发布结果
+
+        Args:
+            work_id: 工作ID
+            user_id: 用户ID
+            nickname: 公众号昵称
+            title: 草稿标题
+            author: 作者
+            publish_result: 发布结果详情
+
+        Returns:
+            操作是否成功
+        """
+        try:
+            if work_id not in self.data:
+                return False
+
+            # 初始化发布记录
+            if 'published_records' not in self.data[work_id]:
+                self.data[work_id]['published_records'] = []
+
+            # 添加发布记录，包含详细信息
+            publish_record = {
+                "user_id": user_id,
+                "nickname": nickname,
+                "title": title,
+                "author": author,
+                "published_at": datetime.now().isoformat(),
+                "result": publish_result or {}
+            }
+
+            self.data[work_id]['published_records'].append(publish_record)
+
+            success = self._save_data()
+            if success:
+                logger.info(f"工作 {work_id} 发布记录已保存，用户: {user_id}, 标题: {title}")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"标记发布记录失败: {e}")
+            return False
+
+    def is_published(self, work_id: str, user_id: str, nickname: str, title: str) -> bool:
+        """
+        检查工作是否已经发布过（同用户同昵称同标题）
+
+        Args:
+            work_id: 工作ID
+            user_id: 用户ID
+            nickname: 公众号昵称
+            title: 草稿标题
+
+        Returns:
+            是否已发布过
+        """
+        try:
+            work_data = self.data.get(work_id)
+            if not work_data:
+                return False
+
+            published_records = work_data.get('published_records', [])
+
+            # 检查是否有相同的发布记录
+            for record in published_records:
+                if (record.get('user_id') == user_id and
+                    record.get('nickname') == nickname and
+                    record.get('title') == title):
+                    return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"检查发布记录失败: {e}")
+            return False
+
+    def get_published_records(self, work_id: str) -> List[Dict]:
+        """获取工作的发布记录"""
+        work_data = self.data.get(work_id)
+        if work_data:
+            return work_data.get('published_records', [])
+        return []
+
     def get_storage_stats(self) -> Dict[str, int]:
         """获取存储统计信息"""
         total_works = len(self.data)

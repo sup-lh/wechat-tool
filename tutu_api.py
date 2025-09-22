@@ -111,7 +111,7 @@ class TutuAPI:
 📝 描述: {plot}
 🔢 生成数量: {self.fixed_params['shotCount']}张
 ⚡ 快速模式: {'开启' if self.fixed_params['quickMode'] else '关闭'}
-📋 任务ID: {task_id}
+📋 任务ID: #{task_id}
 🔄 状态: {status}
 
 🔗 请稍等片刻，图片正在生成中...
@@ -230,7 +230,7 @@ class TutuAPI:
 
         message = f"""📸 图图作品分镜查询结果
 
-🆔 工作ID: {work_id}
+🆔 工作ID: #{work_id}
 📊 进度: {completed_count}/{total_shots} 已完成
 
 """

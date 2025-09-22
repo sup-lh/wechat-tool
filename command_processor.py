@@ -6,6 +6,8 @@
 import re
 import time
 import os
+import threading
+import html
 from typing import Dict, Tuple, List
 from config import ConfigManager
 from wechat_api import WeChatAPI
@@ -207,6 +209,19 @@ class CommandProcessor:
         if content.startswith('查询图图'):
             return 'tutu_query_help', {}
 
+        # 查询发布结果格式：查询发布结果 {工作ID}
+        query_publish_pattern = r'^查询发布结果\s+([a-zA-Z0-9]+)$'
+        query_publish_match = re.match(query_publish_pattern, content)
+        if query_publish_match:
+            work_id = query_publish_match.group(1)
+            return 'tutu_publish_query', {
+                'work_id': work_id.strip()
+            }
+
+        # 查询发布结果格式检测（格式错误提示）
+        if content.startswith('查询发布结果'):
+            return 'tutu_publish_query_help', {}
+
         # 发布图图格式：发布图图 {工作ID} {昵称} {标题} [作者]
         publish_tutu_pattern = r'^发布图图\s+([a-zA-Z0-9]+)\s+(.+?)\s+(.+?)(?:\s+(.+?))?$'
         publish_tutu_match = re.match(publish_tutu_pattern, content)
@@ -289,6 +304,10 @@ class CommandProcessor:
             return self._handle_tutu_publish(user_id, params)
         elif command == 'tutu_publish_help':
             return self._handle_tutu_publish_help()
+        elif command == 'tutu_publish_query':
+            return self._handle_tutu_publish_query(params)
+        elif command == 'tutu_publish_query_help':
+            return self._handle_tutu_publish_query_help()
 
         # 基础功能
         elif command == 'greeting':
@@ -442,6 +461,7 @@ token:your_token"""
 • 图图 标题 描述 - 生成专属图片
 • 查询图图 工作ID - 查看图片生成进度并自动绑定
 • 发布图图 工作ID 昵称 标题 [作者] - 发布系列图片草稿箱
+• 查询发布结果 工作ID - 查看详细的发布记录和统计
 
 """
 
@@ -758,7 +778,7 @@ token:your_token"""
 
             return f"""✅ 已经生成并绑定成功{image_count}张图片！
 
-🆔 工作ID: {work_id}
+🆔 工作ID: #{work_id}
 🎨 标题: {title}
 📊 状态: 已完成并绑定
 📸 图片数量: {image_count}张
@@ -796,7 +816,7 @@ token:your_token"""
 
                     return f"""✅ 已经生成并绑定成功{image_count}张图片！
 
-🆔 工作ID: {work_id}
+🆔 工作ID: #{work_id}
 🎨 标题: {title}
 📊 状态: 刚刚完成并自动绑定
 📸 图片数量: {image_count}张
@@ -816,7 +836,7 @@ token:your_token"""
             error_message = result.get('message', '查询失败') if result else '网络错误'
             return f"""❌ 查询图图作品失败
 
-🆔 工作ID: {work_id}
+🆔 工作ID: #{work_id}
 ❗ 错误信息: {error_message}
 
 请检查工作ID是否正确或稍后重试～ (´∀｀)"""
@@ -839,7 +859,7 @@ token:your_token"""
 嘿嘿~ 用这个指令来查看你的图片生成进度吧！(´∀｀) 📸✨"""
 
     def _handle_tutu_publish(self, user_id: str, params: Dict) -> str:
-        """处理发布图图到草稿箱请求"""
+        """处理发布图图到草稿箱请求 - 快速验证并异步处理"""
         work_id = params.get('work_id', '')
         nickname = params.get('nickname', '')
         title = params.get('title', '')
@@ -850,144 +870,240 @@ token:your_token"""
 
         logger.info(f"用户 {user_id} 请求发布图图作品 - 工作ID: {work_id}, 配置: {nickname}, 标题: {title}")
 
+        # 快速验证阶段 - 必须在5秒内完成
         # 1. 验证WorkID是否存在
         if not self.work_storage.work_exists(work_id):
             return f"""❌ 工作ID未找到或未绑定
 
-🆔 工作ID: {work_id}
+🆔 工作ID: #{work_id}
 
 请先使用「查询图图 {work_id}」确认图片已生成并绑定成功～ (´∀｀)"""
 
-        # 2. 获取用户配置
+        # 2. 检查是否已经发布过相同的内容
+        if self.work_storage.is_published(work_id, user_id, nickname, title):
+            published_records = self.work_storage.get_published_records(work_id)
+            matching_records = [r for r in published_records if
+                              r.get('user_id') == user_id and
+                              r.get('nickname') == nickname and
+                              r.get('title') == title]
+
+            if matching_records:
+                last_record = matching_records[-1]
+                published_time = last_record.get('published_at', '未知时间')
+
+                return f"""⚠️ 已经发布过相同内容
+
+🆔 工作ID: #{work_id}
+📝 标题: {title}
+📱 公众号: {nickname}
+👤 作者: {author}
+⏰ 上次发布时间: {published_time[:19]}
+
+💡 如果确实需要重复发布，请更换标题或使用不同的昵称～ (´∀｀)"""
+
+        # 3. 验证用户配置
         config = self.config_manager.get_user_config(user_id, nickname)
         if not config:
             return f"❌ 找不到昵称 '{nickname}' 的配置\r\n\r\n要不先绑定一个？嘿嘿~ (´∀｀)"
 
-        # 3. 获取access_token
-        access_token = self.wechat_api.get_access_token(config['appid'], config['secret'])
-        if not access_token:
-            return f"""❌ 获取微信访问令牌失败
-
-📱 公众号: {nickname}
-🔧 请检查AppID和Secret配置是否正确～ (´∀｀)"""
-
-        # 4. 获取图片URLs
+        # 4. 验证图片是否存在
         image_urls = self.work_storage.get_image_urls(work_id)
-
         if not image_urls:
             return f"""❌ 未找到绑定的图片
 
-🆔 工作ID: {work_id}
+🆔 工作ID: #{work_id}
 
 请重新查询图图状态确认图片已正确绑定～ (´∀｀)"""
 
-        logger.info(f"开始处理 {len(image_urls)} 张图片")
+        # 快速验证通过，启动后台处理
+        threading.Thread(
+            target=self._async_process_tutu_publish,
+            args=(user_id, work_id, nickname, title, author, config, image_urls),
+            daemon=True
+        ).start()
 
-        # 5. 批量下载并上传图片
-        uploaded_media_ids = []
-        temp_files = []
+        # 立即返回处理中的消息
+        return f"""🚀 开始发布图片作品集
 
-        try:
-            for i, image_url in enumerate(image_urls, 1):
-                logger.info(f"📥 处理第 {i}/{len(image_urls)} 张图片")
-
-                # 下载图片
-                temp_path = self.wechat_api.download_image_from_url(image_url)
-
-                if temp_path:
-                    temp_files.append(temp_path)
-
-                    # 上传到永久素材库
-                    media_id = self.wechat_api.upload_material(access_token, temp_path)
-
-                    if media_id:
-                        uploaded_media_ids.append(media_id)
-                        logger.info(f"✅ 第 {i} 张图片上传成功: {media_id}")
-                    else:
-                        logger.error(f"❌ 第 {i} 张图片上传失败")
-                        break
-                else:
-                    logger.error(f"❌ 第 {i} 张图片下载失败")
-                    break
-
-            # 6. 生成富文本内容
-            if uploaded_media_ids:
-                work_data = self.work_storage.get_work(work_id)
-                original_title = work_data.get('title', 'AI生成图片')
-
-                content = self._generate_tutu_article_content(
-                    uploaded_media_ids, work_id, original_title
-                )
-
-                # 7. 创建草稿箱（使用第一张图片作为封面）
-                thumb_media_id = uploaded_media_ids[0]
-                draft_media_id = self.wechat_api.add_draft(
-                    access_token, title, content, thumb_media_id, author
-                )
-
-                if draft_media_id:
-                    success_message = f"""✅ 系列图片草稿箱创建成功！
-
-🆔 工作ID: {work_id}
-📝 文章标题: {title}
-👤 作者: {author}
+🆔 工作ID: #{work_id}
+📝 标题: {title}
 📱 公众号: {nickname}
-📸 包含图片: {len(uploaded_media_ids)}张
-📋 草稿箱ID: {draft_media_id}
+👤 作者: {author}
+📸 包含图片: {len(image_urls)}张
 
-🎨 封面: 使用第一张生成图片
-💡 内容: 包含所有图片和分镜描述
+⏳ 正在后台处理中，预计需要1-2分钟...
+📱 请稍后到微信公众平台后台「素材管理」→「草稿箱」查看
 
-快去微信公众平台后台「素材管理」→「草稿箱」查看你的专属作品吧！✨
+嘿嘿~ 马上就好啦！(´∀｀) ✨"""
 
-嘿嘿~ 你的AI图片作品集已经准备好啦！(´∀｀) 🎨💖"""
-                    return success_message
-                else:
-                    return f"""❌ 草稿箱创建失败
+    def _async_process_tutu_publish(self, user_id: str, work_id: str, nickname: str,
+                                   title: str, author: str, config: Dict, image_urls: List[str]) -> None:
+        """异步处理图图发布 - 使用图文消息图片上传接口"""
+        try:
+            logger.info(f"开始异步处理图图发布 - 用户: {user_id}, 工作ID: {work_id}")
 
-📸 图片已成功上传到素材库
-🔧 请检查公众号权限或稍后重试～ (´∀｀)"""
-
+            # 1. 获取access_token
+            logger.info(f"🔑 正在获取access_token, AppID: {config['appid']}")
+            access_token = self.wechat_api.get_access_token(config['appid'], config['secret'])
+            if not access_token:
+                logger.error(f"异步处理失败：获取access_token失败 - 工作ID: {work_id}")
+                return
             else:
-                return f"""❌ 图片处理失败
+                logger.info(f"✅ access_token获取成功: {access_token[:20]}...")
 
-🆔 工作ID: {work_id}
-❗ 无法下载或上传图片
+            logger.info(f"开始处理 {len(image_urls)} 张图片，使用图文消息图片上传接口")
 
-请检查网络连接或稍后重试～ (´∀｀)"""
+            # 2. 批量下载并上传图片，获取微信图片URL
+            wechat_image_urls = []
+            temp_files = []
+            processing_stats = {
+                "total_images": len(image_urls),
+                "downloaded_count": 0,
+                "uploaded_count": 0,
+                "failed_downloads": [],
+                "failed_uploads": [],
+                "successful_images": []
+            }
 
-        finally:
-            # 8. 清理临时文件
-            for temp_file in temp_files:
-                try:
-                    if os.path.exists(temp_file):
-                        os.unlink(temp_file)
-                        logger.info(f"🧹 清理临时文件: {temp_file}")
-                except Exception as e:
-                    logger.warning(f"清理临时文件失败: {e}")
+            try:
+                for i, image_url in enumerate(image_urls, 1):
+                    logger.info(f"📥 处理第 {i}/{len(image_urls)} 张图片")
+                    logger.info(f"🔗 原始图片URL: {image_url}")
 
-    def _generate_tutu_article_content(self, media_ids: List[str], work_id: str, original_title: str) -> str:
-        """生成图图文章的富文本内容（符合微信公众号规范）"""
+                    # 下载图片
+                    temp_path = self.wechat_api.download_image_from_url(image_url)
 
-        # 文章头部信息
-        content = f"""<p style="text-align: center;"><strong>🎨 AI生成图片作品集</strong></p>
-<p style="text-align: center; color: #666; font-size: 14px;">原始标题：{original_title}</p>
-<p style="text-align: center; color: #666; font-size: 12px;">工作ID：{work_id}</p>
-<p style="text-align: center; color: #666; font-size: 12px;">生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}</p>
-<p><br></p>
-<p style="text-align: center; color: #999;">━━━━━━━━━━━━━━━━━━━━━━━━━━━━</p>
-<p><br></p>"""
+                    if temp_path:
+                        temp_files.append(temp_path)
+                        processing_stats["downloaded_count"] += 1
+                        logger.info(f"✅ 图片下载成功: {temp_path}")
 
-        # 添加每张图片
-        for i, media_id in enumerate(media_ids, 1):
-            content += f"""<p style="text-align: center; margin-top: 20px;"><strong>📸 分镜 {i}</strong></p>
-<p style="text-align: center; margin: 10px 0;">
-    <img data-src="{media_id}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
-</p>
-<p><br></p>"""
+                        # 使用图文消息图片上传接口
+                        logger.info(f"🔄 开始上传图片到微信...")
+                        wechat_image_url = self.wechat_api.upload_image_for_article(access_token, temp_path)
 
+                        if wechat_image_url:
+                            wechat_image_urls.append(wechat_image_url)
+                            processing_stats["uploaded_count"] += 1
+                            processing_stats["successful_images"].append({
+                                "index": i,
+                                "original_url": image_url,
+                                "wechat_url": wechat_image_url
+                            })
+                            logger.info(f"✅ 第 {i} 张图片上传成功: {wechat_image_url}")
+                        else:
+                            processing_stats["failed_uploads"].append({
+                                "index": i,
+                                "original_url": image_url,
+                                "reason": "上传到微信失败"
+                            })
+                            logger.error(f"❌ 第 {i} 张图片上传失败，详细错误请查看控制台输出")
+                            # 继续处理其他图片，不中断
+                    else:
+                        processing_stats["failed_downloads"].append({
+                            "index": i,
+                            "original_url": image_url,
+                            "reason": "下载失败"
+                        })
+                        logger.error(f"❌ 第 {i} 张图片下载失败，URL: {image_url}")
+                        # 继续处理其他图片，不中断
 
-        return content
+                logger.info(f"📊 图片处理统计: 总共{processing_stats['total_images']}张, 下载成功{processing_stats['downloaded_count']}张, 上传成功{processing_stats['uploaded_count']}张")
+
+                # 3. 只要有一张图片成功就继续发布
+                if wechat_image_urls:
+                    work_data = self.work_storage.get_work(work_id)
+                    original_title = work_data.get('title', 'AI生成图片')
+
+                    content = self._generate_tutu_article_content(
+                        wechat_image_urls, work_id, original_title
+                    )
+
+                    # 4. 处理封面图片（使用第一张成功的图片作为封面）
+                    thumb_media_id = ""
+                    if temp_files:
+                        try:
+                            # 找到第一张成功上传的图片对应的临时文件
+                            first_successful_index = processing_stats["successful_images"][0]["index"] - 1
+                            if first_successful_index < len(temp_files):
+                                first_temp_file = temp_files[first_successful_index]
+                                upload_result = self.wechat_api.upload_material(access_token, first_temp_file)
+
+                                if upload_result:
+                                    thumb_media_id = upload_result.get('media_id', '')
+                                    logger.info(f"✅ 封面图片上传成功: {thumb_media_id}")
+                                else:
+                                    logger.warning("封面图片上传失败")
+                        except Exception as e:
+                            logger.warning(f"封面图片处理失败: {e}")
+
+                    # 5. 创建草稿箱
+                    draft_media_id = self.wechat_api.add_draft(
+                        access_token, title, content, thumb_media_id, author
+                    )
+
+                    if draft_media_id:
+                        # 6. 记录发布信息（包含详细的处理结果）
+                        publish_result = {
+                            "draft_media_id": draft_media_id,
+                            "processing_stats": processing_stats,
+                            "has_cover": bool(thumb_media_id),
+                            "cover_media_id": thumb_media_id
+                        }
+
+                        self.work_storage.mark_as_published(work_id, user_id, nickname, title, author, publish_result)
+                        logger.info(f"✅ 异步发布成功 - 工作ID: {work_id}, 草稿箱ID: {draft_media_id}, 成功图片: {processing_stats['uploaded_count']}/{processing_stats['total_images']}")
+                    else:
+                        logger.error(f"❌ 异步发布失败：草稿箱创建失败 - 工作ID: {work_id}")
+                else:
+                    logger.error(f"❌ 异步发布失败：所有图片处理失败 - 工作ID: {work_id}")
+                    logger.error(f"失败详情: 下载失败{len(processing_stats['failed_downloads'])}张, 上传失败{len(processing_stats['failed_uploads'])}张")
+
+            finally:
+                # 7. 清理临时文件（包括压缩后的文件）
+                for temp_file in temp_files:
+                    try:
+                        if os.path.exists(temp_file):
+                            os.unlink(temp_file)
+                            logger.info(f"🧹 清理临时文件: {temp_file}")
+
+                        # 清理可能的压缩文件
+                        compressed_file = temp_file.replace('.jpg', '_compressed.jpg')
+                        if os.path.exists(compressed_file):
+                            os.unlink(compressed_file)
+                            logger.info(f"🧹 清理压缩文件: {compressed_file}")
+                    except Exception as e:
+                        logger.warning(f"清理临时文件失败: {e}")
+
+        except Exception as e:
+            logger.error(f"异步处理图图发布时发生错误: {e}, 工作ID: {work_id}")
+
+    def _generate_tutu_article_content(self, image_urls: List[str], work_id: str, original_title: str) -> str:
+        """生成图图文章的富文本内容（精简版：只包含图片，无文字描述）"""
+
+        # 生成唯一容器ID
+        timestamp = int(time.time())
+        container_id = f"markdown-preview-{timestamp}"
+
+        # 生成图片HTML列表，直接使用远程URL，去掉所有文字
+        img_htmls = []
+        for i, image_url in enumerate(image_urls, 1):
+            # 确保图片URL安全
+            safe_image_url = html.escape(str(image_url))
+            alt_text = f"AI生成图片{i}"
+
+            # 只保留图片，去掉标题和描述
+            img_html = f"""<section style="margin: 15px 0; text-align: center;">
+<img src="{safe_image_url}" alt="{alt_text}" style="max-width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 8px;">
+</section>"""
+            img_htmls.append(img_html)
+
+        # 组装完整的HTML内容，只包含图片
+        full_content = f"""<section id="{container_id}" style="padding: 20px; max-width: 100%; box-sizing: border-box;">
+{chr(10).join(img_htmls)}
+</section>"""
+
+        return full_content
 
     def _handle_tutu_publish_help(self) -> str:
         """处理发布图图帮助信息"""
@@ -1037,4 +1153,107 @@ token:your_token"""
 
         except Exception as e:
             logger.warning(f"清理过期暂存标题失败: {e}")
+
+    def _handle_tutu_publish_query(self, params: Dict) -> str:
+        """处理查询发布结果请求"""
+        work_id = params.get('work_id', '')
+        if not work_id:
+            return self._handle_tutu_publish_query_help()
+
+        logger.info(f"处理查询发布结果请求 - 工作ID: {work_id}")
+
+        # 检查工作是否存在
+        if not self.work_storage.work_exists(work_id):
+            return f"""❌ 工作ID不存在
+🆔 工作ID: #{work_id}
+请检查工作ID是否正确，或先使用「查询图图 {work_id}」确认作品已生成～ (´∀｀)"""
+
+        # 获取工作数据
+        work_data = self.work_storage.get_work(work_id)
+        title = work_data.get('title', '未知作品')
+        total_images = len(work_data.get('image_urls', []))
+        created_at = work_data.get('created_at', '')
+
+        # 获取发布记录
+        published_records = self.work_storage.get_published_records(work_id)
+
+        if not published_records:
+            return f"""📊 发布结果查询
+🆔 工作ID: #{work_id}
+🎨 作品标题: {title}
+📸 包含图片: {total_images}张
+📅 创建时间: {created_at[:19] if created_at else '未知'}
+
+📋 发布状态: 暂未发布
+💡 使用「发布图图 {work_id} 昵称 标题」来发布作品～ (´∀｀)"""
+
+        # 格式化发布记录
+        message = f"""📊 发布结果查询
+🆔 工作ID: #{work_id}
+🎨 作品标题: {title}
+📸 包含图片: {total_images}张
+📅 创建时间: {created_at[:19] if created_at else '未知'}
+
+📋 发布记录 (共{len(published_records)}次):
+"""
+
+        for i, record in enumerate(published_records, 1):
+            user_id = record.get('user_id', '未知用户')
+            nickname = record.get('nickname', '未知昵称')
+            publish_title = record.get('title', '未知标题')
+            author = record.get('author', '未知作者')
+            published_at = record.get('published_at', '')
+            result = record.get('result', {})
+
+            # 解析发布结果统计
+            stats = result.get('processing_stats', {}) if isinstance(result, dict) else {}
+            total_processed = stats.get('total_images', 0)
+            uploaded_count = stats.get('uploaded_count', 0)
+            successful_count = len(stats.get('successful_images', []))
+
+            success_rate = f"{uploaded_count}/{total_processed}" if total_processed > 0 else "未知"
+
+            message += f"""
+🔖 发布记录 #{i}:
+  👤 用户: {user_id}
+  📱 昵称: {nickname}
+  📝 标题: {publish_title}
+  ✍️ 作者: {author}
+  ⏰ 发布时间: {published_at[:19] if published_at else '未知'}
+  📊 成功率: {success_rate}张图片上传成功"""
+
+            if stats:
+                failed_downloads = stats.get('failed_downloads', [])
+                failed_uploads = stats.get('failed_uploads', [])
+                if failed_downloads or failed_uploads:
+                    message += f"\n  ⚠️ 失败详情:"
+                    if failed_downloads:
+                        message += f" 下载失败{len(failed_downloads)}张"
+                    if failed_uploads:
+                        message += f" 上传失败{len(failed_uploads)}张"
+
+        message += "\n\n✨ 查询完成！详细的发布统计数据已显示～ (´∀｀)"
+        return message
+
+    def _handle_tutu_publish_query_help(self) -> str:
+        """处理查询发布结果帮助信息"""
+        return """📊 查询发布结果功能帮助
+
+正确格式：
+查询发布结果 工作ID
+
+例如：
+查询发布结果 e8bcd7eb6182101601067111e8d231a9
+
+📝 使用说明：
+• 工作ID：图图作品的工作ID
+• 查看该作品的所有发布记录
+• 显示详细的图片处理统计信息
+• 包含成功率、失败原因等数据
+
+💡 提示：
+可以查看作品被发布到哪些公众号
+以及每次发布时的图片转换情况
+
+嘿嘿~ 用这个指令来查看你的发布历史记录吧！(´∀｀) 📊✨"""
 

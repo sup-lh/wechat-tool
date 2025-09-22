@@ -9,7 +9,7 @@ import tempfile
 import random
 import re
 from typing import Optional, Dict, Any, List
-# from PIL import Image, ImageDraw, ImageFont  # 临时注释掉
+from PIL import Image
 from io import BytesIO
 
 class WeChatAPI:
@@ -172,8 +172,8 @@ class WeChatAPI:
             print(f"下载微信图片时发生错误: {e}")
             return None
 
-    def upload_material(self, access_token: str, image_path: str, material_type: str = "image") -> Optional[str]:
-        """上传永久素材"""
+    def upload_material(self, access_token: str, image_path: str, material_type: str = "image") -> Optional[Dict]:
+        """上传永久素材，返回完整的素材信息"""
         url = f"{self.base_url}/cgi-bin/material/add_material"
         params = {
             "access_token": access_token,
@@ -189,15 +189,196 @@ class WeChatAPI:
                 response = requests.post(url, params=params, files=files, timeout=30)
                 data = response.json()
 
+                print(f"🔍 微信API完整返回: {json.dumps(data, ensure_ascii=False, indent=2)}")
+
                 if "media_id" in data:
                     print(f"素材上传成功! media_id: {data['media_id']}")
-                    return data["media_id"]
+                    # 返回完整的数据，而不只是media_id
+                    return data
                 else:
                     print(f"素材上传失败: {data.get('errmsg', '未知错误')}")
                     return None
 
         except Exception as e:
             print(f"上传素材时发生错误: {e}")
+            return None
+
+    def compress_image_if_needed(self, image_path: str, max_size: int = 1048576) -> str:
+        """
+        如果图片超过指定大小，则压缩图片
+
+        Args:
+            image_path: 原始图片路径
+            max_size: 最大文件大小（字节），默认1MB
+
+        Returns:
+            压缩后的图片路径（可能是原路径或新路径）
+        """
+        try:
+            file_size = os.path.getsize(image_path)
+            print(f"📏 原始图片大小: {file_size} bytes")
+
+            if file_size <= max_size:
+                print(f"✅ 图片大小符合要求，无需压缩")
+                return image_path
+
+            print(f"🗜️ 图片超过{max_size}字节，开始压缩...")
+
+            # 打开图片
+            with Image.open(image_path) as img:
+                # 转换为RGB（如果是RGBA）
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    img = img.convert('RGB')
+
+                # 计算压缩质量
+                quality = 85
+                compressed_path = image_path.replace('.jpg', '_compressed.jpg')
+
+                while quality > 20:
+                    # 保存到内存中测试大小
+                    with BytesIO() as buffer:
+                        img.save(buffer, format='JPEG', quality=quality, optimize=True)
+                        buffer_size = buffer.tell()
+
+                        print(f"🔄 质量 {quality}%，大小: {buffer_size} bytes")
+
+                        if buffer_size <= max_size:
+                            # 大小合适，保存到文件
+                            with open(compressed_path, 'wb') as f:
+                                buffer.seek(0)
+                                f.write(buffer.read())
+
+                            final_size = os.path.getsize(compressed_path)
+                            print(f"✅ 压缩完成: {file_size} -> {final_size} bytes ({final_size/file_size*100:.1f}%)")
+                            return compressed_path
+
+                    quality -= 10
+
+                # 如果质量降到20%还是太大，尝试缩小尺寸
+                print(f"⚠️ 降低质量无效，尝试缩小图片尺寸...")
+                width, height = img.size
+                scale = 0.8
+
+                while scale > 0.3:
+                    new_width = int(width * scale)
+                    new_height = int(height * scale)
+                    resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                    with BytesIO() as buffer:
+                        resized_img.save(buffer, format='JPEG', quality=75, optimize=True)
+                        buffer_size = buffer.tell()
+
+                        print(f"🔄 尺寸 {new_width}x{new_height}，大小: {buffer_size} bytes")
+
+                        if buffer_size <= max_size:
+                            with open(compressed_path, 'wb') as f:
+                                buffer.seek(0)
+                                f.write(buffer.read())
+
+                            final_size = os.path.getsize(compressed_path)
+                            print(f"✅ 压缩完成: {file_size} -> {final_size} bytes ({final_size/file_size*100:.1f}%)")
+                            return compressed_path
+
+                    scale -= 0.1
+
+                print(f"❌ 无法将图片压缩到{max_size}字节以下")
+                return image_path
+
+        except Exception as e:
+            print(f"❌ 图片压缩失败: {e}")
+            return image_path
+
+    def upload_image_for_article(self, access_token: str, image_path: str) -> Optional[str]:
+        """
+        上传图文消息图片，返回可直接在HTML中使用的图片URL
+
+        Args:
+            access_token: 微信访问令牌
+            image_path: 本地图片文件路径
+
+        Returns:
+            图片URL字符串，失败时返回None
+        """
+        url = f"{self.base_url}/cgi-bin/media/uploadimg"
+        params = {
+            "access_token": access_token
+        }
+
+        try:
+            # 详细日志：文件信息
+            if not os.path.exists(image_path):
+                print(f"❌ 文件不存在: {image_path}")
+                return None
+
+            # 自动压缩图片到1MB以下
+            compressed_path = self.compress_image_if_needed(image_path, 1048576)
+
+            file_size = os.path.getsize(compressed_path)
+            print(f"📋 准备上传图片: {compressed_path}, 最终大小: {file_size} bytes")
+
+            # 最后检查（理论上不应该再超过，但以防万一）
+            if file_size > 1048576:
+                print(f"❌ 压缩后仍然太大: {file_size} bytes > 1MB")
+                return None
+
+            with open(compressed_path, 'rb') as f:
+                files = {
+                    'media': (os.path.basename(compressed_path), f, 'image/jpeg')
+                }
+
+                print(f"🌐 发送请求到: {url}")
+                print(f"📋 请求参数: {params}")
+
+                response = requests.post(url, params=params, files=files, timeout=30)
+
+                print(f"📨 HTTP响应状态码: {response.status_code}")
+                print(f"📨 HTTP响应头: {dict(response.headers)}")
+
+                # 尝试解析JSON响应
+                try:
+                    data = response.json()
+                    print(f"🔍 图文消息图片上传API返回: {json.dumps(data, ensure_ascii=False, indent=2)}")
+                except json.JSONDecodeError as e:
+                    print(f"❌ JSON解析失败: {e}")
+                    print(f"📨 原始响应内容: {response.text}")
+                    return None
+
+                # 修复：微信uploadimg接口成功时可能不返回errcode，直接检查是否有url
+                if 'url' in data:
+                    image_url = data['url']
+                    print(f"✅ 图文消息图片上传成功! URL: {image_url}")
+                    return image_url
+                elif 'errcode' in data:
+                    # 有错误码的情况
+                    errcode = data.get('errcode')
+                    error_msg = data.get('errmsg', '未知错误')
+                    print(f"❌ 图文消息图片上传失败: errcode={errcode}, errmsg={error_msg}")
+
+                    # 常见错误码解释
+                    if errcode == 40005:
+                        print("💡 错误提示: invalid file type - 文件格式不正确，只支持jpg/png")
+                    elif errcode == 40009:
+                        print("💡 错误提示: invalid image size - 图片尺寸太大")
+                    elif errcode == 40001:
+                        print("💡 错误提示: invalid credential - access_token无效或过期")
+                    elif errcode == 41001:
+                        print("💡 错误提示: access_token missing - 缺少access_token")
+
+                    return None
+                else:
+                    print(f"❌ 未知响应格式: {data}")
+                    return None
+
+        except requests.exceptions.Timeout:
+            print("❌ 请求超时")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"❌ 网络请求异常: {e}")
+            return None
+        except Exception as e:
+            print(f"❌ 上传图文消息图片时发生未知错误: {e}")
+            import traceback
+            print(f"📋 错误堆栈: {traceback.format_exc()}")
             return None
 
     def add_draft(self, access_token: str, title: str, content: str, thumb_media_id: str,
