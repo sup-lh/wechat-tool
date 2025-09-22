@@ -222,16 +222,31 @@ class CommandProcessor:
         if content.startswith('查询发布结果'):
             return 'tutu_publish_query_help', {}
 
-        # 发布图图格式：发布图图 {工作ID} {昵称} {标题} [作者]
-        publish_tutu_pattern = r'^发布图图\s+([a-zA-Z0-9]+)\s+(.+?)\s+(.+?)(?:\s+(.+?))?$'
+        # 快速发布草稿格式：发布草稿 {昵称} {media_id}
+        publish_draft_pattern = r'^发布草稿\s+(.+?)\s+([a-zA-Z0-9_-]+)$'
+        publish_draft_match = re.match(publish_draft_pattern, content)
+        if publish_draft_match:
+            nickname, media_id = publish_draft_match.groups()
+            return 'publish_draft', {
+                'nickname': nickname.strip(),
+                'media_id': media_id.strip()
+            }
+
+        # 发布草稿格式检测（格式错误提示）
+        if content.startswith('发布草稿'):
+            return 'publish_draft_help', {}
+
+        # 发布图图格式：发布图图 {工作ID} {昵称} {标题} [作者] [立即发布]
+        publish_tutu_pattern = r'^发布图图\s+([a-zA-Z0-9]+)\s+(.+?)\s+(.+?)(?:\s+(.+?))?(?:\s+(立即发布))?$'
         publish_tutu_match = re.match(publish_tutu_pattern, content)
         if publish_tutu_match:
-            work_id, nickname, title, author = publish_tutu_match.groups()
+            work_id, nickname, title, author, auto_publish = publish_tutu_match.groups()
             return 'tutu_publish', {
                 'work_id': work_id.strip(),
                 'nickname': nickname.strip(),
                 'title': title.strip(),
-                'author': author.strip() if author else "不存在的画廊"
+                'author': author.strip() if author else "不存在的画廊",
+                'auto_publish': bool(auto_publish)  # 如果有"立即发布"参数则为True
             }
 
         # 发布图图格式检测（格式错误提示）
@@ -308,6 +323,10 @@ class CommandProcessor:
             return self._handle_tutu_publish_query(params)
         elif command == 'tutu_publish_query_help':
             return self._handle_tutu_publish_query_help()
+        elif command == 'publish_draft':
+            return self._handle_publish_draft(user_id, params)
+        elif command == 'publish_draft_help':
+            return self._handle_publish_draft_help()
 
         # 基础功能
         elif command == 'greeting':
@@ -460,8 +479,9 @@ token:your_token"""
 🎨 图片生成功能：
 • 图图 标题 描述 - 生成专属图片
 • 查询图图 工作ID - 查看图片生成进度并自动绑定
-• 发布图图 工作ID 昵称 标题 [作者] - 发布系列图片草稿箱
+• 发布图图 工作ID 昵称 标题 [作者] [立即发布] - 发布系列图片草稿箱
 • 查询发布结果 工作ID - 查看详细的发布记录和统计
+• 发布草稿 昵称 media_id - 快速发布已有草稿
 
 """
 
@@ -915,10 +935,13 @@ token:your_token"""
 
 请重新查询图图状态确认图片已正确绑定～ (´∀｀)"""
 
+        # 获取auto_publish参数
+        auto_publish = params.get('auto_publish', False)
+
         # 快速验证通过，启动后台处理
         threading.Thread(
             target=self._async_process_tutu_publish,
-            args=(user_id, work_id, nickname, title, author, config, image_urls),
+            args=(user_id, work_id, nickname, title, author, config, image_urls, auto_publish),
             daemon=True
         ).start()
 
@@ -937,8 +960,8 @@ token:your_token"""
 嘿嘿~ 马上就好啦！(´∀｀) ✨"""
 
     def _async_process_tutu_publish(self, user_id: str, work_id: str, nickname: str,
-                                   title: str, author: str, config: Dict, image_urls: List[str]) -> None:
-        """异步处理图图发布 - 使用图文消息图片上传接口"""
+                                   title: str, author: str, config: Dict, image_urls: List[str], auto_publish: bool = False) -> None:
+        """异步处理图图发布 - 使用图文消息图片上传接口，可选自动发布草稿"""
         try:
             logger.info(f"开始异步处理图图发布 - 用户: {user_id}, 工作ID: {work_id}")
 
@@ -1043,16 +1066,36 @@ token:your_token"""
                     )
 
                     if draft_media_id:
-                        # 6. 记录发布信息（包含详细的处理结果）
+                        # 6. 可选自动发布草稿
+                        publish_id = None
+                        publish_success = False
+                        if auto_publish:
+                            logger.info(f"🚀 开始自动发布草稿 - draft_media_id: {draft_media_id}")
+                            publish_result_api = self.wechat_api.publish_draft(access_token, draft_media_id)
+                            if publish_result_api:
+                                publish_id = publish_result_api.get('publish_id', '')
+                                publish_success = True
+                                logger.info(f"✅ 草稿自动发布成功 - publish_id: {publish_id}")
+                            else:
+                                logger.error(f"❌ 草稿自动发布失败 - draft_media_id: {draft_media_id}")
+
+                        # 7. 记录发布信息（包含详细的处理结果和发布状态）
                         publish_result = {
                             "draft_media_id": draft_media_id,
                             "processing_stats": processing_stats,
                             "has_cover": bool(thumb_media_id),
-                            "cover_media_id": thumb_media_id
+                            "cover_media_id": thumb_media_id,
+                            "auto_publish": auto_publish,
+                            "publish_success": publish_success,
+                            "publish_id": publish_id
                         }
 
                         self.work_storage.mark_as_published(work_id, user_id, nickname, title, author, publish_result)
-                        logger.info(f"✅ 异步发布成功 - 工作ID: {work_id}, 草稿箱ID: {draft_media_id}, 成功图片: {processing_stats['uploaded_count']}/{processing_stats['total_images']}")
+
+                        if auto_publish and publish_success:
+                            logger.info(f"✅ 异步发布并自动发布成功 - 工作ID: {work_id}, 草稿箱ID: {draft_media_id}, 发布ID: {publish_id}, 成功图片: {processing_stats['uploaded_count']}/{processing_stats['total_images']}")
+                        else:
+                            logger.info(f"✅ 异步发布成功 - 工作ID: {work_id}, 草稿箱ID: {draft_media_id}, 成功图片: {processing_stats['uploaded_count']}/{processing_stats['total_images']}")
                     else:
                         logger.error(f"❌ 异步发布失败：草稿箱创建失败 - 工作ID: {work_id}")
                 else:
@@ -1110,27 +1153,30 @@ token:your_token"""
         return """📤 发布图图功能帮助
 
 正确格式：
-发布图图 工作ID 昵称 标题 [作者]
+发布图图 工作ID 昵称 标题 [作者] [立即发布]
 
 例如：
 发布图图 e8bcd7eb6182101601067111e8d231a9 我的公众号 美丽风景作品集 小编
+发布图图 e8bcd7eb6182101601067111e8d231a9 我的公众号 美丽风景作品集 小编 立即发布
 
 📝 使用说明：
 • 工作ID：已绑定的图图任务ID
 • 昵称：您绑定的公众号配置昵称
 • 标题：草稿箱文章标题
 • 作者：可选，默认为"不存在的画廊"
+• 立即发布：可选，添加此参数将在创建草稿后自动发布
 
 🎨 功能特点：
 • 自动下载所有生成的图片
 • 批量上传到微信永久素材库
 • 创建包含所有图片的富文本草稿箱
 • 使用第一张图片作为封面
-• 包含分镜描述和作品信息
+• 支持自动发布到公众号（需添加"立即发布"参数）
 
 💡 提示：
 先用「查询图图 工作ID」确认图片已绑定
 再用此指令创建专属的图片作品集
+加上"立即发布"可以自动发布到公众号
 
 嘿嘿~ 让你的AI图片变成精美的公众号文章！(´∀｀) 📤✨"""
 
@@ -1256,4 +1302,94 @@ token:your_token"""
 以及每次发布时的图片转换情况
 
 嘿嘿~ 用这个指令来查看你的发布历史记录吧！(´∀｀) 📊✨"""
+
+    def _handle_publish_draft(self, user_id: str, params: Dict) -> str:
+        """处理快速发布草稿请求"""
+        nickname = params.get('nickname', '')
+        media_id = params.get('media_id', '')
+
+        if not nickname or not media_id:
+            return self._handle_publish_draft_help()
+
+        logger.info(f"用户 {user_id} 请求发布草稿 - 昵称: {nickname}, media_id: {media_id}")
+
+        # 1. 验证配置是否存在
+        user_configs = self.config_manager.get_user_configs(user_id)
+        if not user_configs or nickname not in user_configs:
+            return f"""❌ 配置不存在
+📱 昵称: {nickname}
+请先使用「绑定」指令绑定该公众号配置～ (´∀｀)"""
+
+        config = user_configs[nickname]
+
+        # 2. 获取access_token
+        access_token = self.wechat_api.get_access_token(config['appid'], config['secret'])
+        if not access_token:
+            return f"""❌ 获取access_token失败
+📱 公众号: {nickname}
+请检查AppID和Secret是否正确～ (´∀｀)"""
+
+        # 3. 调用发布草稿API
+        logger.info(f"开始发布草稿 - media_id: {media_id}")
+        publish_result = self.wechat_api.publish_draft(access_token, media_id)
+
+        if publish_result:
+            publish_id = publish_result.get('publish_id', '')
+            msg_data_id = publish_result.get('msg_data_id', '')
+
+            logger.info(f"✅ 草稿发布成功 - publish_id: {publish_id}")
+
+            return f"""✅ 草稿发布成功！
+
+📱 公众号: {nickname}
+📋 草稿ID: {media_id}
+🚀 发布ID: {publish_id}
+📊 消息ID: {msg_data_id}
+
+💡 提示：
+发布任务已提交，正在后台处理中...
+大约需要几分钟时间完成发布
+请到公众号后台查看发布结果
+
+嘿嘿~ 你的草稿马上就能和大家见面啦！(´∀｀) 🎉"""
+        else:
+            logger.error(f"❌ 草稿发布失败 - media_id: {media_id}")
+            return f"""❌ 草稿发布失败
+
+📱 公众号: {nickname}
+📋 草稿ID: {media_id}
+
+可能的原因：
+• 草稿ID不存在或已过期
+• 草稿未通过发布检查
+• 需要在公众平台手动保存
+• API权限不足
+
+请检查草稿状态或稍后重试～ (´∀｀)"""
+
+    def _handle_publish_draft_help(self) -> str:
+        """处理发布草稿帮助信息"""
+        return """🚀 快速发布草稿功能帮助
+
+正确格式：
+发布草稿 昵称 media_id
+
+例如：
+发布草稿 我的公众号 ngfXDeWwLJUH04sLYixwo9We8jWhfkMmvczXnUDNefsrBa3M512JeviC6z4hvKEt
+
+📝 使用说明：
+• 昵称：您绑定的公众号配置昵称
+• media_id：草稿的媒体ID（在草稿创建成功后获得）
+
+🎯 适用场景：
+• 直接发布已创建的草稿
+• 无需重新处理图片或内容
+• 快速将草稿箱内容发布到公众号
+
+💡 提示：
+发布后需要等待微信后台处理
+可能会收到原创审核等通知
+建议先在公众平台预览确认内容
+
+嘿嘿~ 一键发布草稿，简单快捷！(´∀｀) 🚀✨"""
 

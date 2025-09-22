@@ -395,7 +395,7 @@ class WeChatAPI:
             "articles": [{
                 "title": title,
                 "author": author,
-                "digest": digest,
+                "digest": 'super_tutu_design',
                 "content": content,
                 "content_source_url": "",
                 "thumb_media_id": thumb_media_id,
@@ -670,3 +670,65 @@ class WeChatAPI:
             message += "😅 所有图片都上传失败了，请检查网络连接或稍后重试～"
 
         return message
+
+    def publish_draft(self, access_token: str, media_id: str) -> Optional[Dict]:
+        """
+        发布草稿到公众号
+
+        Args:
+            access_token: 访问令牌
+            media_id: 草稿的media_id
+
+        Returns:
+            API响应结果，成功时返回字典，失败时返回None
+        """
+        try:
+            url = f"{self.base_url}/cgi-bin/freepublish/submit"
+
+            params = {
+                'access_token': access_token
+            }
+
+            data = {
+                'media_id': media_id
+            }
+
+            logger.info(f"发布草稿 - media_id: {media_id}")
+
+            response = requests.post(
+                url,
+                params=params,
+                json=data,
+                timeout=30
+            )
+
+            logger.info(f"发布草稿API响应状态码: {response.status_code}")
+            logger.info(f"发布草稿API响应内容: {response.text}")
+
+            if response.status_code == 200:
+                result = response.json()
+                errcode = result.get('errcode', -1)
+
+                if errcode == 0:
+                    logger.info(f"草稿发布提交成功 - publish_id: {result.get('publish_id', '')}")
+                    return result
+                else:
+                    errmsg = result.get('errmsg', '未知错误')
+                    logger.error(f"草稿发布失败 - errcode: {errcode}, errmsg: {errmsg}")
+                    return None
+            else:
+                logger.error(f"发布草稿API调用失败 - 状态码: {response.status_code}")
+                return None
+
+        except requests.exceptions.Timeout:
+            logger.error("发布草稿API调用超时")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"发布草稿API调用异常: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"发布草稿API响应解析失败: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"发布草稿时发生未知错误: {e}")
+            return None
